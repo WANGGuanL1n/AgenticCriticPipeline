@@ -9,7 +9,7 @@ import base64, json, urllib.request
 class VLMBackend(Protocol):
     """VLM 调用后端"""
     def generate(self, prompt: str, images: list[str]) -> str: ...
-    def score(self, prompt: str, images: list[str]) -> dict: ...
+    def score(self, prompt: str, images: list[str], rubric: str = "") -> dict: ...
 
 
 class DetectorBackend(Protocol):
@@ -87,15 +87,20 @@ class OpenAICompatVLM:
                 "Authorization": f"Bearer {self.api_key}",
             },
         )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            result = json.loads(resp.read())
+        try:
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as e:
+            body_text = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"VLM API HTTP {e.code}: {body_text[:300]}") from e
+        result = json.loads(raw)
         return result["choices"][0]["message"]["content"]
 
     def generate(self, prompt: str, images: list[str]) -> str:
         """Send prompt + images, return raw text"""
         return self._chat(prompt, images)
 
-    def score(self, prompt: str, images: list[str]) -> dict:
+    def score(self, prompt: str, images: list[str], rubric: str = "") -> dict:
         """Send prompt + images, return structured dict (with JSON mode)"""
         text = self._chat(
             prompt + "\n\nReply ONLY with valid JSON, no markdown fences.",
@@ -119,7 +124,7 @@ class MockVLM:
     def generate(self, prompt: str, images: list[str]) -> str:
         return "Mock VLM response."
 
-    def score(self, prompt: str, images: list[str]) -> dict:
+    def score(self, prompt: str, images: list[str], rubric: str = "") -> dict:
         return {"score": 6, "confidence": 0.7, "rationale": "Mock VLM rationale."}
 
 
