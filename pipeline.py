@@ -1,17 +1,18 @@
 """
 Pipeline — 主编排器：src→target→critique→repair 完整闭环
 用法：
-    pipeline = GapPipeline(vlm=my_vlm, detector=my_detector, ...)
-    result = pipeline.evaluate(src_path, target_path, task_type="portrait")
-    print(result.overall_alignment)
+    pipeline = GapPipeline(vlm_api_key="sk-...", vlm_base_url="http://...", task_type="portrait")
+    result = pipeline.evaluate(src_path, target_path)
+    print(result["gap"].overall_alignment)
 """
 from .gap_types import GapChannel, GapScore, RepairDirective, RepairAction, AggregateGap, RoutingDecision, CritiqueTrajectory
-from .dimension_critics import DIMENSION_CRITICS
-from .soul_skills.artists import ARTIST_PROFILES, ArtistProfile
+from .dimension_critics import DIMENSION_CRITICS, snap_to_anchor
+from .soul_skills.artists import ARTIST_PROFILES, ArtistProfile, _make_artist_critique_prompt
 from .router import route
 from .aggregator import aggregate
-from .backends import VLMBackend, DetectorBackend, OCREngine, IQAEngine, PaletteExtractor
+from .backends import VLMBackend, DetectorBackend, OCREngine, IQAEngine, PaletteExtractor, OpenAICompatVLM
 from dataclasses import dataclass, field
+import json, traceback
 
 
 @dataclass
@@ -45,17 +46,28 @@ class GapPipeline:
     """Main pipeline for src→target gap evaluation with soul-skill artist panel"""
 
     def __init__(self,
+                 vlm_api_key: str = "",
+                 vlm_base_url: str = "",
+                 vlm_model: str = "gemini-3-flash-preview",
                  vlm: VLMBackend = None,
                  detector: DetectorBackend = None,
                  ocr: OCREngine = None,
                  iqa: IQAEngine = None,
                  palette: PaletteExtractor = None,
                  task_type: str = "portrait"):
-        self.backends = {"vlm": vlm, "detector": detector, "ocr": ocr, "iqa": iqa, "palette": palette}
         self.task_type = task_type
-        # Default mock backends if none provided
-        from .backends import MockVLM, MockDetector, MockOCR, MockIQA, MockPalette
-        self.backends.setdefault("vlm", MockVLM())
+
+        # Real VLM if credentials provided, else explicit override, else mock
+        if vlm_api_key and vlm_base_url:
+            self._vlm = OpenAICompatVLM(vlm_api_key, vlm_base_url, vlm_model)
+        elif vlm:
+            self._vlm = vlm
+        else:
+            from .backends import MockVLM
+            self._vlm = MockVLM()
+
+        self.backends = {"vlm": self._vlm, "detector": detector, "ocr": ocr, "iqa": iqa, "palette": palette}
+        from .backends import MockDetector, MockOCR, MockIQA, MockPalette
         self.backends.setdefault("detector", MockDetector())
         self.backends.setdefault("ocr", MockOCR())
         self.backends.setdefault("iqa", MockIQA())
@@ -82,7 +94,6 @@ class GapPipeline:
 
         # Step 2: Run dimension critics (always-on subset)
         dim_scores = {}
-        # Map each critic to the backend kwargs it accepts
         critic_kwargs_map = {
             "compositional": ["vlm", "detector"],
             "stylistic": ["vlm", "palette"],
@@ -104,26 +115,23 @@ class GapPipeline:
                         rationale=f"Error: {e}", critic_name=name
                     )
 
-        # Step 3: Run artist critics (routed subset)
+        # Step 3: Run artist critics via VLM (real or mock fallback)
         artist_channel_scores = {}
         for artist_key in routing.selected_artist_critics:
             profile = ARTIST_PROFILES.get(artist_key)
             if not profile:
                 continue
-            # Each artist evaluates all 4 channels
-            channel_dict = {}
             on_domain = routing.artist_on_domain.get(artist_key, 0.3)
-            for channel in GapChannel:
-                # Simulate artist critique — in production, call VLM with _make_artist_critique_prompt
-                # For now, generate a plausible mock based on the profile
-                score = _mock_artist_channel_score(profile, channel, on_domain)
-                channel_dict[channel.name] = GapScore(
-                    channel=channel,
-                    score=score,
-                    confidence=0.4 + on_domain * 0.3,  # 0.4-0.7 range
-                    rationale=_make_mock_rationale(profile, channel),
-                    critic_name=f"artist.{artist_key}",
-                )
+
+            try:
+                prompt = _make_artist_critique_prompt(profile, src_path, target_path)
+                raw = self._vlm.score(prompt, [src_path, target_path])
+                channel_dict = _parse_artist_response(raw, artist_key, profile, on_domain)
+            except Exception as e:
+                # Fallback to mock on any error (network, parse, etc.)
+                print(f"  [WARN] artist {artist_key} VLM call failed: {e} — falling back to mock")
+                channel_dict = _mock_artist_scores(profile, on_domain)
+
             artist_channel_scores[artist_key] = channel_dict
 
         # Step 4: Aggregate
@@ -169,35 +177,76 @@ class GapPipeline:
         }
 
 
-def _mock_artist_channel_score(profile: ArtistProfile, channel: GapChannel, on_domain: float) -> int:
-    """Generate a plausible mock score based on artist's perceptual bias"""
+# ─── Artist VLM parsing ───
+
+def _parse_artist_response(raw: dict, artist_key: str, profile: ArtistProfile, on_domain: float) -> dict:
+    """Parse VLM JSON response into channel GapScores"""
+    channels_raw = raw.get("channels", {})
+    channel_dict = {}
+    channel_map = {
+        "STRUCTURAL": GapChannel.STRUCTURAL,
+        "STYLISTIC": GapChannel.STYLISTIC,
+        "SEMANTIC": GapChannel.SEMANTIC,
+        "QUALITY": GapChannel.QUALITY,
+    }
+    for ch_name, ch_data in channels_raw.items():
+        channel = channel_map.get(ch_name.upper())
+        if not channel:
+            continue
+        score = float(ch_data.get("score", 6))
+        rationale = ch_data.get("rationale", "")
+        confidence = 0.4 + on_domain * 0.3
+        channel_dict[channel.name] = GapScore(
+            channel=channel,
+            score=snap_to_anchor(score),
+            confidence=min(1.0, confidence),
+            rationale=rationale,
+            critic_name=f"artist.{artist_key}",
+        )
+    # Fill any missing channels with defaults
+    for channel in GapChannel:
+        if channel.name not in channel_dict:
+            channel_dict[channel.name] = GapScore(
+                channel=channel, score=6, confidence=0.3,
+                rationale="No evaluation provided",
+                critic_name=f"artist.{artist_key}",
+            )
+    return channel_dict
+
+
+# ─── Mock fallback (preserved from original) ───
+
+def _mock_artist_scores(profile: ArtistProfile, on_domain: float) -> dict:
+    """Generate mock artist scores when VLM is unavailable"""
     import hashlib
-    seed = int(hashlib.md5(f"{profile.name}:{channel.name}".encode()).hexdigest()[:8], 16)
-    base_score = (seed % 10)
-    # Artists score lower (less gap) on their primary channels
-    if channel in profile.perceptual_bias:
-        base_score = max(0, base_score - 2)
-    # Off-domain artists have higher variance
-    if on_domain < 0.4:
-        base_score = min(10, base_score + 2)
-    # Snap to anchor
-    anchors = [0, 2, 4, 6, 8, 10]
-    return min(anchors, key=lambda a: abs(a - base_score))
-
-
-def _make_mock_rationale(profile: ArtistProfile, channel: GapChannel) -> str:
-    """Generate an artist-voiced mock rationale"""
+    channel_dict = {}
     axioms = profile.axioms
-    axiom_idx = hash(f"{profile.name}:{channel.name}") % len(axioms)
-    axiom = axioms[axiom_idx]
     voice_hints = {
         GapChannel.STRUCTURAL: ("composition", "layout", "arrangement"),
         GapChannel.STYLISTIC: ("palette", "light", "brushwork"),
         GapChannel.SEMANTIC: ("subject", "entities", "what is depicted"),
         GapChannel.QUALITY: ("finish", "rendering", "execution"),
     }
-    hint = voice_hints.get(channel, ("aspect",))
-    return f'The {hint[0]} does not satisfy: "{axiom}"'
+    for channel in GapChannel:
+        seed = int(hashlib.md5(f"{profile.name}:{channel.name}".encode()).hexdigest()[:8], 16)
+        base_score = seed % 10
+        if channel in profile.perceptual_bias:
+            base_score = max(0, base_score - 2)
+        if on_domain < 0.4:
+            base_score = min(10, base_score + 2)
+        anchors = [0, 2, 4, 6, 8, 10]
+        score = min(anchors, key=lambda a: abs(a - base_score))
+        axiom_idx = hash(f"{profile.name}:{channel.name}") % len(axioms)
+        hint = voice_hints.get(channel, ("aspect",))
+        rationale = f'The {hint[0]} does not satisfy: "{axioms[axiom_idx]}"'
+        channel_dict[channel.name] = GapScore(
+            channel=channel,
+            score=score,
+            confidence=0.4 + on_domain * 0.3,
+            rationale=rationale,
+            critic_name=f"artist.{profile.name.lower().split()[0]}",
+        )
+    return channel_dict
 
 
 def _format_for_planner(gap: AggregateGap, routing: RoutingDecision) -> str:

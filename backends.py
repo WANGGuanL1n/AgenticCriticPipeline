@@ -3,12 +3,13 @@ Backend protocols — 可插拔的实际服务接口
 """
 from typing import Protocol, Optional
 from dataclasses import dataclass
+import base64, json, urllib.request
 
 
 class VLMBackend(Protocol):
-    """VLM 调用后端（Claude API / Qwen-VL / GLM-4V 等）"""
+    """VLM 调用后端"""
     def generate(self, prompt: str, images: list[str]) -> str: ...
-    def score(self, prompt: str, image_path: str, rubric: str) -> dict[str, float]: ...
+    def score(self, prompt: str, images: list[str]) -> dict: ...
 
 
 class DetectorBackend(Protocol):
@@ -38,14 +39,88 @@ class PaletteExtractor(Protocol):
     def extract(self, image_path: str) -> Palette: ...
 
 
+# --------------- Real VLM Backend (OpenAI-compatible API) ---------------
+
+def _image_to_data_url(path: str) -> str:
+    """Encode image file as base64 data URL"""
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    suffix = path.rsplit(".", 1)[-1].lower()
+    if suffix == "jpg":
+        suffix = "jpeg"
+    if suffix not in ("png", "jpeg", "gif", "webp"):
+        suffix = "png"
+    return f"data:image/{suffix};base64,{b64}"
+
+
+class OpenAICompatVLM:
+    """OpenAI-compatible vision API backend (Chat Completions with images)"""
+
+    def __init__(self, api_key: str, base_url: str, model: str = "gemini-3-flash-preview"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+
+    def _chat(self, prompt: str, images: list[str],
+              response_format: dict | None = None) -> str:
+        """Send a chat completion request with images via Vision API"""
+        content = [{"type": "text", "text": prompt}]
+        for img_path in images:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": _image_to_data_url(img_path)},
+            })
+
+        body: dict = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": content}],
+        }
+        if response_format:
+            body["response_format"] = response_format
+
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/v1/chat/completions",
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            result = json.loads(resp.read())
+        return result["choices"][0]["message"]["content"]
+
+    def generate(self, prompt: str, images: list[str]) -> str:
+        """Send prompt + images, return raw text"""
+        return self._chat(prompt, images)
+
+    def score(self, prompt: str, images: list[str]) -> dict:
+        """Send prompt + images, return structured dict (with JSON mode)"""
+        text = self._chat(
+            prompt + "\n\nReply ONLY with valid JSON, no markdown fences.",
+            images,
+            response_format={"type": "json_object"},
+        )
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # Fallback: try to extract JSON from markdown fences
+            if "```json" in text:
+                text = text.split("```json", 1)[1].split("```", 1)[0]
+            elif "```" in text:
+                text = text.split("```", 1)[1].split("```", 1)[0]
+            return json.loads(text.strip())
+
+
 # --------------- Mock backends for testing / cold start ---------------
 
 class MockVLM:
     def generate(self, prompt: str, images: list[str]) -> str:
         return "Mock VLM response."
 
-    def score(self, prompt: str, image_path: str, rubric: str) -> dict[str, float]:
-        return {"score": 6.0, "confidence": 0.7}
+    def score(self, prompt: str, images: list[str]) -> dict:
+        return {"score": 6, "confidence": 0.7, "rationale": "Mock VLM rationale."}
 
 
 class MockDetector:
