@@ -22,7 +22,7 @@ Reply in JSON: {"score": int, "rationale": "..."}
         result = vlm.score(prompt, [src_path, target_path], "compositional")
         return GapScore(channel=GapChannel.STRUCTURAL,
                         score=snap_to_anchor(result.get("score", 6)),
-                        confidence=result.get("confidence", 0.6),
+                        confidence=0,
                         rationale=result.get("rationale", ""),
                         critic_name="dim.compositional")
     return _mock_gap(GapChannel.STRUCTURAL, 4, "Mock compositional check")
@@ -39,7 +39,7 @@ Reply JSON: {"score": int, "rationale": "..."}}
         result = vlm.score(prompt, [src_path, target_path], "stylistic")
         return GapScore(channel=GapChannel.STYLISTIC,
                         score=snap_to_anchor(result.get("score", 6)),
-                        confidence=result.get("confidence", 0.55),
+                        confidence=0,
                         rationale=result.get("rationale", ""),
                         critic_name="dim.stylistic")
     return _mock_gap(GapChannel.STYLISTIC, 5, "Mock stylistic check")
@@ -56,7 +56,7 @@ Reply JSON: {"score": int, "rationale": "..."}}
         result = vlm.score(prompt, [src_path, target_path], "semantic")
         return GapScore(channel=GapChannel.SEMANTIC,
                         score=snap_to_anchor(result.get("score", 6)),
-                        confidence=result.get("confidence", 0.65),
+                        confidence=0,
                         rationale=result.get("rationale", ""),
                         critic_name="dim.semantic")
     return _mock_gap(GapChannel.SEMANTIC, 3, "Mock semantic check")
@@ -73,7 +73,7 @@ Reply JSON: {"score": int, "rationale": "..."}}
         result = vlm.score(prompt, [src_path, target_path], "quality")
         return GapScore(channel=GapChannel.QUALITY,
                         score=snap_to_anchor(result.get("score", 6)),
-                        confidence=result.get("confidence", 0.6),
+                        confidence=0,
                         rationale=result.get("rationale", ""),
                         critic_name="dim.quality")
     return _mock_gap(GapChannel.QUALITY, 4, "Mock quality check")
@@ -94,7 +94,7 @@ def palette_diff(src_path: str, target_path: str, palette: PaletteExtractor = No
         score = min(10, diff / 3 * 10)
         return GapScore(channel=GapChannel.STYLISTIC,
                         score=snap_to_anchor(score),
-                        confidence=0.85,
+                        confidence=0,
                         rationale=f"Palette distance={diff:.2f}, contrast diff={abs(src_pal.contrast_ratio - tgt_pal.contrast_ratio):.2f}",
                         critic_name="dim.palette_diff")
     return _mock_gap(GapChannel.STYLISTIC, 3, "Mock palette diff")
@@ -106,13 +106,13 @@ def text_fidelity(src_path: str, target_path: str, ocr: OCREngine = None) -> Gap
         src_text = ocr.extract(src_path)
         tgt_text = ocr.extract(target_path)
         if not tgt_text.strip():
-            return GapScore(channel=GapChannel.SEMANTIC, score=0, confidence=0.9,
+            return GapScore(channel=GapChannel.SEMANTIC, score=0, confidence=0,
                             rationale="No text in target", critic_name="dim.text_fidelity")
         # Simple Levenshtein-like ratio
         score = 10 * (1 - _text_similarity(src_text, tgt_text))
         return GapScore(channel=GapChannel.SEMANTIC,
                         score=snap_to_anchor(score),
-                        confidence=0.88,
+                        confidence=0,
                         rationale=f"src='{src_text[:50]}' vs tgt='{tgt_text[:50]}'",
                         critic_name="dim.text_fidelity")
     return _mock_gap(GapChannel.SEMANTIC, 0, "Mock text fidelity")
@@ -130,7 +130,7 @@ Reply JSON: {"score": int, "rationale": "..."}}
         result = vlm.score(prompt, [src_path], "anatomy")
         return GapScore(channel=GapChannel.QUALITY,
                         score=snap_to_anchor(result.get("score", 6)),
-                        confidence=result.get("confidence", 0.5),
+                        confidence=0,
                         rationale=result.get("rationale", ""),
                         critic_name="dim.anatomy")
     return _mock_gap(GapChannel.QUALITY, 2, "Mock anatomy check")
@@ -143,7 +143,7 @@ def snap_to_anchor(raw: float) -> int:
 
 
 def _mock_gap(channel: GapChannel, score: float, rationale: str) -> GapScore:
-    return GapScore(channel=channel, score=int(score), confidence=0.5,
+    return GapScore(channel=channel, score=int(score), confidence=0,
                     rationale=rationale, critic_name="mock")
 
 

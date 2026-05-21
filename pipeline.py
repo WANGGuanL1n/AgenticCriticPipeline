@@ -111,7 +111,7 @@ class GapPipeline:
                     dim_scores[name] = fn(src_path, target_path, **kwargs)
                 except Exception as e:
                     dim_scores[name] = GapScore(
-                        channel=GapChannel.QUALITY, score=6, confidence=0.1,
+                        channel=GapChannel.QUALITY, score=6, confidence=0,
                         rationale=f"Error: {e}", critic_name=name
                     )
 
@@ -196,11 +196,11 @@ def _parse_artist_response(raw: dict, artist_key: str, profile: ArtistProfile, o
             continue
         score = float(ch_data.get("score", 6))
         rationale = ch_data.get("rationale", "")
-        confidence = 0.4 + on_domain * 0.3
+        confidence = 0
         channel_dict[channel.name] = GapScore(
             channel=channel,
             score=snap_to_anchor(score),
-            confidence=min(1.0, confidence),
+            confidence=0,
             rationale=rationale,
             critic_name=f"artist.{artist_key}",
         )
@@ -208,7 +208,7 @@ def _parse_artist_response(raw: dict, artist_key: str, profile: ArtistProfile, o
     for channel in GapChannel:
         if channel.name not in channel_dict:
             channel_dict[channel.name] = GapScore(
-                channel=channel, score=6, confidence=0.3,
+                channel=channel, score=6, confidence=0,
                 rationale="No evaluation provided",
                 critic_name=f"artist.{artist_key}",
             )
@@ -243,7 +243,7 @@ def _mock_artist_scores(profile: ArtistProfile, on_domain: float) -> dict:
         channel_dict[channel.name] = GapScore(
             channel=channel,
             score=score,
-            confidence=0.4 + on_domain * 0.3,
+            confidence=0,
             rationale=rationale,
             critic_name=f"artist.{profile.name.lower().split()[0]}",
         )
