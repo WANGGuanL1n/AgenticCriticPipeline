@@ -92,7 +92,67 @@ This is the data structure used for GRPO training and post-hoc analysis.
 | **SEMANTIC** | Content, entities, what is depicted | Missing object mentioned in prompt |
 | **QUALITY** | Finish level, resolution, technical execution | Blurry vs sharp rendering |
 
-Scoring anchor: `0` = perfect alignment, `10` = completely different.
+## Rubric — Scoring Criteria
+
+All critics (dimension and artist) use the same **0–10 anchor scale**, snapped to even values {0, 2, 4, 6, 8, 10} by `snap_to_anchor()`. The score represents the **src→target gap** — higher = worse alignment.
+
+### Universal Anchor Scale
+
+| Score | Meaning (Gap) | Meaning (Alignment) |
+|-------|--------------|---------------------|
+| **0** | Identical — src and target are indistinguishable | Perfect match |
+| **2** | Nearly identical — minor, barely perceptible differences | Almost perfect |
+| **4** | Similar — noticeable differences but same general character | Mostly aligned |
+| **6** | Moderate gap — clearly different, recognizable relationship remains | Partially aligned |
+| **8** | Major differences — fundamentally different in the assessed dimension | Weakly aligned |
+| **10** | Completely different — the source and target share nothing in this dimension | No alignment |
+
+### Dimension Critics — Scoring Anchors
+
+Each dimension critic sends a VLM prompt with dimension-specific anchor definitions. The raw VLM score is then snapped to the nearest even anchor.
+
+| Critic | Channel | Method | Anchor (0–10) Description |
+|--------|---------|--------|---------------------------|
+| `compositional` | STRUCTURAL | VLM | 10=completely different layout, 8=major differences, 6=moderate, 4=similar with key diffs, 2=nearly identical, 0=identical |
+| `stylistic` | STYLISTIC | VLM | 10=massive style gap, 0=indistinguishable style. Evaluates color palette, brushwork, lighting, mood |
+| `semantic` | SEMANTIC | VLM | 10=completely different content, 0=identical subject matter. Evaluates entities, objects, scene |
+| `quality` | QUALITY | VLM | 10=source is far rougher, 0=identical finish quality. Evaluates finish level, detail resolution, rendering |
+| `anatomy` | QUALITY | VLM | 10=severe anatomy issues, 0=physically perfect. Checks extra fingers, impossible poses, broken proportions |
+| `palette_diff` | STYLISTIC | Programmatic | Computed as `min(10, color_distance/3 × 10)`. Dominant colors compared in RGB space |
+| `text_fidelity` | SEMANTIC | Programmatic | Computed as `10 × (1 − dice_similarity(src_text, tgt_text))`. Compares extracted OCR text between src and target |
+
+### Artist Panel — Scoring Framework
+
+Each artist receives the same universal 0–10 anchor scale but interprets it through their **persona**, **5 non-negotiable axioms**, and **perceptual bias**.
+
+| Artist | Era | Axioms (abbreviated) | Perceptual Bias | Scoring Emphasis |
+|--------|-----|---------------------|-----------------|------------------|
+| **Caravaggio** | Baroque (1571–1610) | Light is a knife; anatomy is destiny; shadows must be deep; the model's rib must show; two light sources ruin moral clarity | QUALITY, STRUCTURAL | Anatomical truth, dramatic chiaroscuro — scores harshly on figure realism and lighting consistency |
+| **Monet** | Impressionist (1840–1926) | Shadows are violet/blue/green; paint the light first; single brushstroke > thousands of lines; never mix on palette; paint the air between objects | STYLISTIC, QUALITY | Light authenticity, color temperature, atmosphere — scores harshly on lighting and color relationships |
+| **Hokusai** | Ukiyo-e (1760–1849) | Omitted stroke = drawn stroke; asymmetry breathes; flat color gains depth through relationship; negative space carves the subject; every element must have a place | STRUCTURAL, STYLISTIC | Compositional rhythm, negative space, line economy — scores harshly on clutter and symmetry |
+| **Mondrian** | Abstract / De Stijl (1872–1944) | Diagonal is a compromise — eliminate it; primary colors only + B/W/gray; every line justified by tension; asymmetry balanced by weight; finished when nothing can be removed | STRUCTURAL, STYLISTIC | Geometric purity, color reduction, grid tension — scores harshly on curves, gradients, and non-primary colors |
+| **Moebius** | Modern Comic (1938–2012) | Line must vibrate; detail is for periphery; buildings have souls; character silence = dialogue; cross-hatching follows form like a second skin | STYLISTIC, STRUCTURAL | Line quality, detail density distribution, surreal atmosphere — scores harshly on stiff lines and over-detailed centers |
+| **Rutkowski** | Digital Concept (contemporary) | Value structure first; material must read in <1s; atmospheric perspective is not optional; brushwork must be confident; one grounded detail makes the impossible believable | QUALITY, STYLISTIC | Material readability, value hierarchy, atmosphere — scores harshly on muddled materials and missing atmospheric depth |
+
+Each artist scores all 4 channels (STRUCTURAL, STYLISTIC, SEMANTIC, QUALITY), but channels within their perceptual bias receive **higher effective confidence** (×0.9), while off-bias channels are **penalized** (×0.6). Artists who are "on-domain" (high keyword match with the task) get **higher overall confidence weighting**.
+
+### Score → Alignment Mapping
+
+The **Aggregator** converts raw critic scores into a final `overall_alignment` (0–1):
+
+1. **Per-channel merge**: dimension and artist scores are confidence-weighted averaged per channel
+2. **Disagreement penalty**: if artist standard deviation across channels > 0.4, alignment is penalized (anti reward-hacking)
+3. **Inversion**: `overall_alignment = 1 − (avg_gap / 10)`, clamped to [0, 1]
+4. **Stop condition**: `overall_alignment > 0.9` or 5 consecutive rounds without improvement
+
+```
+Example:
+  3 dimension critics avg: 6.2 (STRUCTURAL), 4.8 (STYLISTIC), 7.0 (SEMANTIC), 5.5 (QUALITY)
+  2 artist panel avg:    5.0 (STRUCTURAL), 3.5 (STYLISTIC), 6.5 (SEMANTIC), 5.0 (QUALITY)
+  → Channel merged:      5.6 (STRUCTURAL), 4.1 (STYLISTIC), 6.8 (SEMANTIC), 5.2 (QUALITY)
+  → Avg gap: 5.43
+  → overall_alignment = 1 − 5.43/10 = 0.457
+```
 
 ## Soul-Skill Artist Panel
 
