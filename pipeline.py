@@ -125,7 +125,7 @@ class GapPipeline:
 
             try:
                 prompt = _make_artist_critique_prompt(profile, src_path, target_path)
-                raw = self._vlm.score(prompt, [src_path, target_path])
+                raw = self._vlm.score(prompt, [src_path, target_path], rubric=f"artist.{artist_key}")
                 channel_dict = _parse_artist_response(raw, artist_key, profile, on_domain)
             except Exception as e:
                 # Fallback to mock on any error (network, parse, etc.)

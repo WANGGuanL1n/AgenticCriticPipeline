@@ -3,7 +3,7 @@ Backend protocols — 可插拔的实际服务接口
 """
 from typing import Protocol, Optional
 from dataclasses import dataclass
-import base64, json, urllib.request
+import base64, json, urllib.request, urllib.error
 
 
 class VLMBackend(Protocol):
@@ -60,7 +60,7 @@ class OpenAICompatVLM:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self._call_log: list[dict] = []  # 记录所有 VLM 调用的原始数据
+        self._call_log: list[dict] = []  # 记录所有 VLM 调用的原始数据（成功+失败）
 
     def _chat(self, prompt: str, images: list[str],
               response_format: dict | None = None) -> tuple[str, dict]:
@@ -96,6 +96,8 @@ class OpenAICompatVLM:
         except urllib.error.HTTPError as e:
             body_text = e.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"VLM API HTTP {e.code}: {body_text[:300]}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"VLM API connection failed: {e}") from e
 
         result = json.loads(raw)
         message = result["choices"][0]["message"]
@@ -123,40 +125,56 @@ class OpenAICompatVLM:
 
     def score(self, prompt: str, images: list[str], rubric: str = "") -> dict:
         """Send prompt + images, return structured dict (with JSON mode).
-        Also injects _vlm_usage metadata into the returned dict.
+        Always logs the call (success or failure) to _call_log.
         """
-        text, metadata = self._chat(
-            prompt + "\n\nReply ONLY with valid JSON, no markdown fences.",
-            images,
-            response_format={"type": "json_object"},
-        )
-
-        # Log this call
-        self._call_log.append({
+        # Prepare call log entry BEFORE the API call
+        call_entry = {
             "rubric": rubric,
             "images_count": len(images),
             "prompt_preview": prompt[:200],
-            "raw_output": text[:2000],       # full VLM text output (truncated for sanity)
-            "raw_output_full_length": len(text),
-            "usage": metadata,
-        })
+            "success": False,
+            "error": None,
+            "raw_output": None,
+            "raw_output_full_length": 0,
+            "usage": None,
+        }
 
         try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            # Fallback: try to extract JSON from markdown fences
-            if "```json" in text:
-                text = text.split("```json", 1)[1].split("```", 1)[0]
-            elif "```" in text:
-                text = text.split("```", 1)[1].split("```", 1)[0]
-            parsed = json.loads(text.strip())
+            text, metadata = self._chat(
+                prompt + "\n\nReply ONLY with valid JSON, no markdown fences.",
+                images,
+                response_format={"type": "json_object"},
+            )
 
-        # Inject VLM usage metadata (won't conflict with score/rationale keys)
-        parsed["_vlm_usage"] = metadata
-        return parsed
+            # Update call entry with success data
+            call_entry["success"] = True
+            call_entry["raw_output"] = text[:2000]
+            call_entry["raw_output_full_length"] = len(text)
+            call_entry["usage"] = metadata
+
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                # Fallback: try to extract JSON from markdown fences
+                if "```json" in text:
+                    text = text.split("```json", 1)[1].split("```", 1)[0]
+                elif "```" in text:
+                    text = text.split("```", 1)[1].split("```", 1)[0]
+                parsed = json.loads(text.strip())
+
+            # Inject VLM usage metadata
+            parsed["_vlm_usage"] = metadata
+            return parsed
+
+        except Exception as e:
+            call_entry["error"] = str(e)[:500]
+            raise
+
+        finally:
+            self._call_log.append(call_entry)
 
     def drain_call_log(self) -> list[dict]:
-        """Return and clear the accumulated VLM call log."""
+        """Return and clear the accumulated VLM call log (both successful and failed calls)."""
         log = self._call_log.copy()
         self._call_log.clear()
         return log
