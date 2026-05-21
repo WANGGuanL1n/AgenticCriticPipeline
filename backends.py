@@ -131,11 +131,10 @@ class OpenAICompatVLM:
         call_entry = {
             "rubric": rubric,
             "images_count": len(images),
-            "prompt_preview": prompt[:200],
+            "prompt": prompt,
             "success": False,
             "error": None,
             "raw_output": None,
-            "raw_output_full_length": 0,
             "usage": None,
         }
 
@@ -148,8 +147,7 @@ class OpenAICompatVLM:
 
             # Update call entry with success data
             call_entry["success"] = True
-            call_entry["raw_output"] = text[:2000]
-            call_entry["raw_output_full_length"] = len(text)
+            call_entry["raw_output"] = text
             call_entry["usage"] = metadata
 
             try:
