@@ -82,6 +82,8 @@ class CritiqueTrajectory:
     task_type: str = ""
     target_descriptor: str = ""
     prior_weak_channels: list[str] = field(default_factory=list)
+    # Raw VLM call log — full API response metadata for each critic invocation
+    raw_vlm_calls: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Serialize to JSON-safe dict"""
@@ -130,4 +132,5 @@ class CritiqueTrajectory:
                 for artist, channels in self.artist_scores.items()
             },
             "aggregated": aggregate_dict(self.aggregated),
+            "raw_vlm_calls": self.raw_vlm_calls,
         }

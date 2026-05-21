@@ -42,9 +42,15 @@ class PaletteExtractor(Protocol):
 # --------------- Real VLM Backend (OpenAI-compatible API) ---------------
 
 def _image_to_data_url(path: str) -> str:
-    """Encode image file as base64 data URL, downscaling if >512px."""
-    from .png_downscale import downscale_png_to_data_url
-    return downscale_png_to_data_url(path, max_dim=512)
+    """Encode image file as base64 data URL"""
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    suffix = path.rsplit(".", 1)[-1].lower()
+    if suffix == "jpg":
+        suffix = "jpeg"
+    if suffix not in ("png", "jpeg", "gif", "webp"):
+        suffix = "png"
+    return f"data:image/{suffix};base64,{b64}"
 
 
 class OpenAICompatVLM:
@@ -54,10 +60,13 @@ class OpenAICompatVLM:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self._call_log: list[dict] = []  # 记录所有 VLM 调用的原始数据
 
     def _chat(self, prompt: str, images: list[str],
-              response_format: dict | None = None) -> str:
-        """Send a chat completion request with images via Vision API"""
+              response_format: dict | None = None) -> tuple[str, dict]:
+        """Send a chat completion request with images via Vision API.
+        Returns (content_text, raw_response_metadata).
+        """
         content = [{"type": "text", "text": prompt}]
         for img_path in images:
             content.append({
@@ -87,29 +96,70 @@ class OpenAICompatVLM:
         except urllib.error.HTTPError as e:
             body_text = e.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"VLM API HTTP {e.code}: {body_text[:300]}") from e
+
         result = json.loads(raw)
-        return result["choices"][0]["message"]["content"]
+        message = result["choices"][0]["message"]
+
+        # Extract usage / reasoning metadata
+        usage = result.get("usage", {})
+        completion_details = usage.get("completion_tokens_details", {})
+        reasoning_tokens = completion_details.get("reasoning_tokens", 0)
+
+        metadata = {
+            "model": result.get("model", self.model),
+            "finish_reason": result["choices"][0].get("finish_reason", ""),
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+            "reasoning_tokens": reasoning_tokens,
+        }
+
+        return message["content"], metadata
 
     def generate(self, prompt: str, images: list[str]) -> str:
         """Send prompt + images, return raw text"""
-        return self._chat(prompt, images)
+        text, _ = self._chat(prompt, images)
+        return text
 
     def score(self, prompt: str, images: list[str], rubric: str = "") -> dict:
-        """Send prompt + images, return structured dict (with JSON mode)"""
-        text = self._chat(
+        """Send prompt + images, return structured dict (with JSON mode).
+        Also injects _vlm_usage metadata into the returned dict.
+        """
+        text, metadata = self._chat(
             prompt + "\n\nReply ONLY with valid JSON, no markdown fences.",
             images,
             response_format={"type": "json_object"},
         )
+
+        # Log this call
+        self._call_log.append({
+            "rubric": rubric,
+            "images_count": len(images),
+            "prompt_preview": prompt[:200],
+            "raw_output": text[:2000],       # full VLM text output (truncated for sanity)
+            "raw_output_full_length": len(text),
+            "usage": metadata,
+        })
+
         try:
-            return json.loads(text)
+            parsed = json.loads(text)
         except json.JSONDecodeError:
             # Fallback: try to extract JSON from markdown fences
             if "```json" in text:
                 text = text.split("```json", 1)[1].split("```", 1)[0]
             elif "```" in text:
                 text = text.split("```", 1)[1].split("```", 1)[0]
-            return json.loads(text.strip())
+            parsed = json.loads(text.strip())
+
+        # Inject VLM usage metadata (won't conflict with score/rationale keys)
+        parsed["_vlm_usage"] = metadata
+        return parsed
+
+    def drain_call_log(self) -> list[dict]:
+        """Return and clear the accumulated VLM call log."""
+        log = self._call_log.copy()
+        self._call_log.clear()
+        return log
 
 
 # --------------- Mock backends for testing / cold start ---------------
@@ -119,7 +169,17 @@ class MockVLM:
         return "Mock VLM response."
 
     def score(self, prompt: str, images: list[str], rubric: str = "") -> dict:
-        return {"score": 6, "confidence": 0.7, "rationale": "Mock VLM rationale."}
+        return {
+            "score": 6, "confidence": 0.7, "rationale": "Mock VLM rationale.",
+            "_vlm_usage": {
+                "model": "mock", "finish_reason": "stop",
+                "prompt_tokens": 0, "completion_tokens": 0,
+                "total_tokens": 0, "reasoning_tokens": 0,
+            }
+        }
+
+    def drain_call_log(self) -> list[dict]:
+        return []
 
 
 class MockDetector:

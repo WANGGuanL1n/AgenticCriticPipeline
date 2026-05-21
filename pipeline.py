@@ -160,6 +160,7 @@ class GapPipeline:
             task_type=self.task_type,
             target_descriptor=target_descriptor,
             prior_weak_channels=[ch.name for ch in prior_weak],
+            raw_vlm_calls=self._vlm.drain_call_log(),
         )
 
         # Step 7: Format output for Planner
