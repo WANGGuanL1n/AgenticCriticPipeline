@@ -42,15 +42,9 @@ class PaletteExtractor(Protocol):
 # --------------- Real VLM Backend (OpenAI-compatible API) ---------------
 
 def _image_to_data_url(path: str) -> str:
-    """Encode image file as base64 data URL"""
-    with open(path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("utf-8")
-    suffix = path.rsplit(".", 1)[-1].lower()
-    if suffix == "jpg":
-        suffix = "jpeg"
-    if suffix not in ("png", "jpeg", "gif", "webp"):
-        suffix = "png"
-    return f"data:image/{suffix};base64,{b64}"
+    """Encode image file as base64 data URL, downscaling if >512px."""
+    from .png_downscale import downscale_png_to_data_url
+    return downscale_png_to_data_url(path, max_dim=512)
 
 
 class OpenAICompatVLM:
