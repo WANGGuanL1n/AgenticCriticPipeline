@@ -118,8 +118,12 @@ def aggregate(
     if all_confs:
         weighted = sum(s * c for s, c in zip(all_scores, all_confs))
         total_conf = sum(all_confs)
-        overall_alignment = max(0.0, 1.0 - weighted / (total_conf * 10))
-        overall_confidence = sum(all_confs) / len(all_confs)
+        if total_conf > 0:
+            overall_alignment = max(0.0, 1.0 - weighted / (total_conf * 10))
+            overall_confidence = total_conf / len(all_confs)
+        else:
+            overall_alignment = max(0.0, 1.0 - sum(all_scores) / (len(all_scores) * 10)) if all_scores else 0.5
+            overall_confidence = 0
     else:
         overall_alignment = 0.5
         overall_confidence = 0.3
